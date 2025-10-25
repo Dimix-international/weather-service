@@ -1,10 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/Dimix-international/weather-service/internal/client/http/geocoding"
+	"github.com/Dimix-international/weather-service/internal/client/http/meteo"
+	"github.com/Dimix-international/weather-service/internal/config"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -14,13 +19,46 @@ import (
 const httpPort = ":3000"
 
 func main() {
+	cfg := config.MustLoadConfig()
+
+	httClient := &http.Client{Timeout: time.Second * 10}
+
+	geocodingClient := geocoding.NewClient(&cfg, httClient)
+	meteoClient := meteo.NewClient(&cfg, httClient)
+
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 
 	r.Get("/{city}", func(w http.ResponseWriter, r *http.Request) {
+		var err error
 		city := chi.URLParam(r, "city")
 
-		w.Write([]byte(city))
+		resp, err := geocodingClient.GetCoords(city)
+		if err != nil {
+			w.Write([]byte("Error"))
+			return
+		}
+
+		var dataWeather meteo.Weather
+
+		if resp.Name != "" {
+			dataWeather, err = meteoClient.GetWeatherByCoord(resp.Latitude, resp.Longitude)
+		} else {
+			dataWeather, err = meteoClient.GetWeatherByCity(city)
+		}
+
+		if err != nil {
+			w.Write([]byte("Error"))
+			return
+		}
+
+		weather, err := json.Marshal(dataWeather)
+		if err != nil {
+			w.Write([]byte("Error"))
+			return
+		}
+
+		w.Write([]byte(weather))
 	})
 
 	wg := sync.WaitGroup{}
