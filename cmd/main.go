@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/Dimix-international/weather-service/db"
 	"github.com/Dimix-international/weather-service/internal/client/http/geocoding"
 	"github.com/Dimix-international/weather-service/internal/client/http/meteo"
 	"github.com/Dimix-international/weather-service/internal/config"
@@ -18,56 +20,66 @@ import (
 
 const httpPort = ":3000"
 
+type Reading struct {
+	Timestamp   time.Time
+	Temperature float64
+}
+
+type Storage struct {
+	data map[string][]Reading
+	mu   sync.RWMutex
+}
+
 func main() {
 	cfg := config.MustLoadConfig()
 
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer dbCancel()
+
+	_, err := db.NewConnect(dbCtx, &cfg)
+	if err != nil {
+		fmt.Println(fmt.Sprintf("failed to connect to db: %v", err))
+		return
+	}
+
 	httClient := &http.Client{Timeout: time.Second * 10}
 
-	geocodingClient := geocoding.NewClient(&cfg, httClient)
-	meteoClient := meteo.NewClient(&cfg, httClient)
+	storage := &Storage{
+		data: make(map[string][]Reading),
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 
 	r.Get("/{city}", func(w http.ResponseWriter, r *http.Request) {
-		var err error
 		city := chi.URLParam(r, "city")
 
-		resp, err := geocodingClient.GetCoords(city)
-		if err != nil {
-			w.Write([]byte("Error"))
+		storage.mu.RLock()
+
+		defer storage.mu.RUnlock()
+
+		reading, ok := storage.data[city]
+		if !ok {
+			w.Write([]byte("not found"))
 			return
 		}
 
-		var dataWeather meteo.Weather
-
-		if resp.Name != "" {
-			dataWeather, err = meteoClient.GetWeatherByCoord(resp.Latitude, resp.Longitude)
-		} else {
-			dataWeather, err = meteoClient.GetWeatherByCity(city)
-		}
-
+		raw, err := json.Marshal(reading)
 		if err != nil {
-			w.Write([]byte("Error"))
+			w.Write([]byte("not found"))
 			return
 		}
 
-		weather, err := json.Marshal(dataWeather)
-		if err != nil {
-			w.Write([]byte("Error"))
-			return
-		}
-
-		w.Write([]byte(weather))
+		w.Write([]byte(raw))
 	})
 
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
-	go func() {
+	go func(cfg *config.Config, httpClient *http.Client, storage *Storage) {
 		defer wg.Done()
-		runCron()
-	}()
+		runCron(cfg, httpClient, storage)
+	}(&cfg, httClient, storage)
 
 	go func() {
 		defer wg.Done()
@@ -78,14 +90,40 @@ func main() {
 	wg.Wait()
 }
 
-func initJobs(s gocron.Scheduler) ([]gocron.Job, error) {
+func initWeatherJobs(s gocron.Scheduler, geo geocoding.GeoStore, weather meteo.WeatherStore, storage *Storage) ([]gocron.Job, error) {
 	j, err := s.NewJob(
 		gocron.DurationJob(
 			10*time.Second,
 		),
 		gocron.NewTask(
 			func() {
-				fmt.Println("hello")
+				var dataWeather meteo.Weather
+
+				geoResp, err := geo.GetCoords("minsk")
+				if err != nil {
+					return
+				}
+
+				if geoResp.Name != "" {
+					dataWeather, err = weather.GetWeatherByCoord(geoResp.Latitude, geoResp.Longitude)
+				} else {
+					dataWeather, err = weather.GetWeatherByCity("minsk")
+				}
+
+				if err != nil {
+					return
+				}
+
+				storage.mu.Lock()
+
+				storage.data["minsk"] = append(storage.data["minsk"], Reading{
+					Timestamp:   time.Now().UTC(),
+					Temperature: dataWeather.Main.Kelvin - 273.15,
+				})
+
+				defer storage.mu.Unlock()
+
+				fmt.Println(dataWeather)
 			},
 		),
 	)
@@ -96,13 +134,16 @@ func initJobs(s gocron.Scheduler) ([]gocron.Job, error) {
 	return []gocron.Job{j}, nil
 }
 
-func runCron() {
+func runCron(cfg *config.Config, httpClient *http.Client, storage *Storage) {
 	s, err := gocron.NewScheduler()
 	if err != nil {
 		return
 	}
 
-	jobs, err := initJobs(s)
+	geocodingClient := geocoding.NewClient(cfg, httpClient)
+	meteoClient := meteo.NewClient(cfg, httpClient)
+
+	jobs, err := initWeatherJobs(s, geocodingClient, meteoClient, storage)
 	if err != nil {
 		return
 	}

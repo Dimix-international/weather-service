@@ -20,6 +20,10 @@ type Response struct {
 	Longitude float64 `json:"longitude"`
 }
 
+type GeoStore interface {
+	GetCoords(city string) (Response, error)
+}
+
 func NewClient(config *config.Config, httpClient *http.Client) *client {
 	return &client{
 		url:        config.GeoURL,

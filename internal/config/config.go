@@ -18,6 +18,12 @@ type Config struct {
 	OpenWeatherKey string `env:"OPEN_WEATHER_KEY"`
 	OpenWeatherURL string `env:"OPEN_WEATHER_URL"`
 	GeoURL         string `env:"GEO_URL"`
+	Database       DB
+}
+
+type DB struct {
+	URI  string `env:"PG_URI,required,notEmpty"`
+	Name string `env:"PG_NAME,required,notEmpty"`
 }
 
 func MustLoadConfig() Config {

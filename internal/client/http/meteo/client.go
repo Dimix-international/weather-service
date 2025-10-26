@@ -23,6 +23,11 @@ type Weather struct {
 	} `json:"main"`
 }
 
+type WeatherStore interface {
+	GetWeatherByCoord(lat float64, lon float64) (Weather, error)
+	GetWeatherByCity(city string) (Weather, error)
+}
+
 func NewClient(config *config.Config, httpClient *http.Client) *client {
 	client := &client{
 		httpClient: httpClient,
