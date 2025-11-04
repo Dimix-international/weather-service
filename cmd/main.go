@@ -23,16 +23,6 @@ import (
 
 const httpPort = ":3000"
 
-type Reading struct {
-	Timestamp   time.Time
-	Temperature float64
-}
-
-type Storage struct {
-	data map[string][]Reading
-	mu   sync.RWMutex
-}
-
 func main() {
 	cfg := config.MustLoadConfig()
 
