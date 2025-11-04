@@ -21,8 +21,6 @@ import (
 	"github.com/go-co-op/gocron/v2"
 )
 
-const httpPort = ":3000"
-
 func main() {
 	cfg := config.MustLoadConfig()
 
@@ -68,11 +66,11 @@ func main() {
 		runCron(cfg, httpClient, weatherStorage)
 	}(&cfg, httClient, weatherStorage)
 
-	go func() {
+	go func(cfg *config.Config) {
 		defer wg.Done()
 		fmt.Println("start server")
-		http.ListenAndServe(httpPort, r)
-	}()
+		http.ListenAndServe(cfg.Port, r)
+	}(&cfg)
 
 	wg.Wait()
 }

@@ -15,6 +15,7 @@ var (
 )
 
 type Config struct {
+	Port           string `env:"APP_PORT"`
 	OpenWeatherKey string `env:"OPEN_WEATHER_KEY"`
 	OpenWeatherURL string `env:"OPEN_WEATHER_URL"`
 	GeoURL         string `env:"GEO_URL"`
