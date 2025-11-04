@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/Dimix-international/weather-service/internal/client/http/geocoding"
 	"github.com/Dimix-international/weather-service/internal/client/http/meteo"
 	"github.com/Dimix-international/weather-service/internal/config"
+	"github.com/Dimix-international/weather-service/internal/models"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -36,7 +39,7 @@ func main() {
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer dbCancel()
 
-	_, err := db.NewConnect(dbCtx, &cfg)
+	client, err := db.NewConnect(dbCtx, &cfg)
 	if err != nil {
 		fmt.Println(fmt.Sprintf("failed to connect to db: %v", err))
 		return
@@ -44,9 +47,7 @@ func main() {
 
 	httClient := &http.Client{Timeout: time.Second * 10}
 
-	storage := &Storage{
-		data: make(map[string][]Reading),
-	}
+	weatherStorage := db.NewWeatherStorage(client.DB)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -54,17 +55,13 @@ func main() {
 	r.Get("/{city}", func(w http.ResponseWriter, r *http.Request) {
 		city := chi.URLParam(r, "city")
 
-		storage.mu.RLock()
-
-		defer storage.mu.RUnlock()
-
-		reading, ok := storage.data[city]
-		if !ok {
-			w.Write([]byte("not found"))
+		weatherData, err := weatherStorage.GetByCityName(r.Context(), city)
+		if err != nil {
+			w.Write([]byte(err.Error()))
 			return
 		}
 
-		raw, err := json.Marshal(reading)
+		raw, err := json.Marshal(weatherData)
 		if err != nil {
 			w.Write([]byte("not found"))
 			return
@@ -76,10 +73,10 @@ func main() {
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
-	go func(cfg *config.Config, httpClient *http.Client, storage *Storage) {
+	go func(cfg *config.Config, httpClient *http.Client, weatherStorage *db.WeatherStorage) {
 		defer wg.Done()
-		runCron(cfg, httpClient, storage)
-	}(&cfg, httClient, storage)
+		runCron(cfg, httpClient, weatherStorage)
+	}(&cfg, httClient, weatherStorage)
 
 	go func() {
 		defer wg.Done()
@@ -90,7 +87,7 @@ func main() {
 	wg.Wait()
 }
 
-func initWeatherJobs(s gocron.Scheduler, geo geocoding.GeoStore, weather meteo.WeatherStore, storage *Storage) ([]gocron.Job, error) {
+func initWeatherJobs(s gocron.Scheduler, geo geocoding.GeoStore, weather meteo.WeatherStore, weatherStorage *db.WeatherStorage) ([]gocron.Job, error) {
 	j, err := s.NewJob(
 		gocron.DurationJob(
 			10*time.Second,
@@ -114,16 +111,24 @@ func initWeatherJobs(s gocron.Scheduler, geo geocoding.GeoStore, weather meteo.W
 					return
 				}
 
-				storage.mu.Lock()
+				modelWeaher := &models.Weather{
+					Name:     "minsk",
+					Kelvin:   dataWeather.Main.Kelvin,
+					Pressure: dataWeather.Main.Pressure,
+					Humidity: dataWeather.Main.Humidity,
+				}
 
-				storage.data["minsk"] = append(storage.data["minsk"], Reading{
-					Timestamp:   time.Now().UTC(),
-					Temperature: dataWeather.Main.Kelvin - 273.15,
-				})
+				ctx := context.Background()
 
-				defer storage.mu.Unlock()
+				err = weatherStorage.Update(ctx, modelWeaher)
+				if err != nil {
+					if errors.Is(err, models.ErrCityWeatherNotFound) {
+						log.Print("create weather for city")
+						weatherStorage.Create(ctx, modelWeaher)
+					}
+				}
 
-				fmt.Println(dataWeather)
+				log.Print("update weather for city")
 			},
 		),
 	)
@@ -134,7 +139,7 @@ func initWeatherJobs(s gocron.Scheduler, geo geocoding.GeoStore, weather meteo.W
 	return []gocron.Job{j}, nil
 }
 
-func runCron(cfg *config.Config, httpClient *http.Client, storage *Storage) {
+func runCron(cfg *config.Config, httpClient *http.Client, weatherStorage *db.WeatherStorage) {
 	s, err := gocron.NewScheduler()
 	if err != nil {
 		return
@@ -143,7 +148,7 @@ func runCron(cfg *config.Config, httpClient *http.Client, storage *Storage) {
 	geocodingClient := geocoding.NewClient(cfg, httpClient)
 	meteoClient := meteo.NewClient(cfg, httpClient)
 
-	jobs, err := initWeatherJobs(s, geocodingClient, meteoClient, storage)
+	jobs, err := initWeatherJobs(s, geocodingClient, meteoClient, weatherStorage)
 	if err != nil {
 		return
 	}
